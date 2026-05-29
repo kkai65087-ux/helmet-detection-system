@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pt
+*.pth
+results.xlsx
+known_faces/
+.vscode/
