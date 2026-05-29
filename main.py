@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 实时头盔佩戴检测系统
-YOLOv5 目标检测 + face_recognition 人脸识别 + Tkinter GUI
-检测结果自动导出至 Excel
+YOLOv5 目标检测 + OpenCV 人脸识别 + Tkinter GUI
 """
 import os
-# 修复 dlib CUDA 驱动兼容性问题
-os.environ['CUDA_VISIBLE_DEVICES'] = ''
+import sys
 
 # 修复 PyTorch 2.6+ 加载旧版 YOLOv5 模型的兼容性问题
 import torch
@@ -27,16 +25,17 @@ from PIL import ImageDraw, ImageFont
 import numpy as np
 import time
 import pickle
-
-import face_recognition
+import warnings
+warnings.filterwarnings('ignore')
 
 # ========== 配置区 ==========
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "weights", "best.pt")
 FONT_PATH = "C:/Windows/Fonts/simkai.ttf"
 EXCEL_FILE = "results.xlsx"
-CONF_THRESHOLD = 0.4          # YOLOv5 置信度阈值
-FACE_DISTANCE_THRESHOLD = 0.5 # 人脸识别距离阈值 (越小越严格)
+CONF_THRESHOLD = 0.4        # YOLOv5 置信度阈值
+FACE_DB_CACHE = os.path.join(BASE_DIR, "face_db.yml")
+FACE_NAMES_CACHE = os.path.join(BASE_DIR, "face_names.pkl")
 # ============================
 
 # --- 字体 ---
@@ -45,20 +44,21 @@ if os.path.exists(FONT_PATH):
 else:
     chinese_font = ImageFont.load_default()
 
+# --- 人脸检测器(OpenCV Haar Cascade, 内置无需下载) ---
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
 # --- 全局变量 ---
 cap = None
 label_img = None
 is_camera_running = False
 model = None
-known_face_encodings = []
+face_recognizer = None
 known_names = []
-face_db_loaded = False
 last_name = "N/A"
 last_helmet_status = "N/A"
 
 
 def load_model():
-    """加载 YOLOv5 模型"""
     global model
     if not os.path.exists(MODEL_PATH):
         messagebox.showwarning("警告", f"模型文件未找到: {MODEL_PATH}")
@@ -69,64 +69,78 @@ def load_model():
 
 def build_face_database():
     """
-    从 known_faces/ 目录加载照片，提取人脸特征并缓存
+    加载 known_faces/ 照片，Haar Cascade 检测人脸，训练 LBPH，缓存
     """
-    global known_face_encodings, known_names, face_db_loaded
+    global face_recognizer, known_names
 
     known_dir = os.path.join(BASE_DIR, "known_faces")
     if not os.path.exists(known_dir):
         return False
 
-    cache_path = os.path.join(BASE_DIR, "face_cache.pkl")
-
-    # 尝试加载缓存
-    if os.path.exists(cache_path):
-        cache_time = os.path.getmtime(cache_path)
-        dir_time = os.path.getmtime(known_dir)
-        if cache_time >= dir_time:
-            try:
-                with open(cache_path, 'rb') as f:
-                    data = pickle.load(f)
-                known_face_encodings = data['encodings']
-                known_names = data['names']
-                face_db_loaded = True
-                print(f"从缓存加载了 {len(known_names)} 个人脸: {known_names}")
+    # 检查缓存
+    names_path = os.path.join(BASE_DIR, "face_names.pkl")
+    yml_path = os.path.join(BASE_DIR, "face_db.yml")
+    if os.path.exists(yml_path) and os.path.exists(names_path):
+        try:
+            cache_mtime = os.path.getmtime(yml_path)
+            dir_mtime = os.path.getmtime(known_dir)
+            if cache_mtime >= dir_mtime:
+                face_recognizer = cv2.face.LBPHFaceRecognizer_create()
+                face_recognizer.read(yml_path)
+                with open(names_path, 'rb') as f:
+                    known_names = pickle.load(f)
+                print(f"从缓存加载: {known_names}")
                 return True
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-    # 重新提取特征
-    encodings_list = []
-    names_list = []
+    faces_data = []
+    labels = []
+    label_map = {}
 
     for filename in os.listdir(known_dir):
         if not filename.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".gif")):
             continue
         image_path = os.path.join(known_dir, filename)
+        # 用 numpy 读取避免中文路径编码问题
+        try:
+            img_data = np.fromfile(image_path, dtype=np.uint8)
+            img = cv2.imdecode(img_data, cv2.IMREAD_COLOR)
+        except Exception:
+            continue
+        if img is None:
+            continue
         name = os.path.splitext(filename)[0]
 
-        img = face_recognition.load_image_file(image_path)
-        encodings = face_recognition.face_encodings(img)
-        if len(encodings) == 0:
-            print(f"警告: {filename} 中未检测到人脸, 跳过")
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
+
+        if len(faces) == 0:
+            print(f"警告: {filename} 未检测到人脸")
             continue
 
-        # 取第一张人脸
-        encodings_list.append(encodings[0])
-        names_list.append(name)
+        # 取最大的人脸
+        x, y, w, h = max(faces, key=lambda r: r[2] * r[3])
+        face_roi = cv2.resize(gray[y:y+h, x:x+w], (100, 100))
+
+        if name not in label_map:
+            label_map[name] = len(label_map)
+        faces_data.append(face_roi)
+        labels.append(label_map[name])
         print(f"已加载: {name}")
 
-    if len(encodings_list) == 0:
+    if len(faces_data) == 0:
         return False
 
-    known_face_encodings = encodings_list
-    known_names = names_list
-    face_db_loaded = True
+    face_recognizer = cv2.face.LBPHFaceRecognizer_create(threshold=80.0)
+    face_recognizer.train(faces_data, np.array(labels))
+    known_names = list(label_map.keys())
 
-    # 缓存
     try:
-        with open(cache_path, 'wb') as f:
-            pickle.dump({'encodings': known_face_encodings, 'names': known_names}, f)
+        face_recognizer.save(os.path.join(BASE_DIR, "face_db.yml"))
+        with open(os.path.join(BASE_DIR, "face_names.pkl"), 'wb') as f:
+            pickle.dump(known_names, f)
     except Exception:
         pass
 
@@ -135,33 +149,38 @@ def build_face_database():
 
 
 def recognize_faces(frame_bgr):
-    """
-    检测并识别画面中的人脸
-    返回: [(left, top, right, bottom, name), ...]
-    """
-    rgb = frame_bgr[:, :, ::-1]
-    locations = face_recognition.face_locations(rgb)
-    if len(locations) == 0:
+    """Haar Cascade 检测 + LBPH 识别"""
+    global face_recognizer, known_names
+
+    if face_recognizer is None:
         return []
 
-    encodings = face_recognition.face_encodings(rgb, locations)
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
+
+    if len(faces) == 0:
+        return []
+
     results = []
-    for (top, right, bottom, left), encoding in zip(locations, encodings):
+    for (x, y, w, h) in faces:
+        face_roi = cv2.resize(gray[y:y+h, x:x+w], (100, 100))
         name = "Unknown"
-        if face_db_loaded and len(known_face_encodings) > 0:
-            distances = face_recognition.face_distance(known_face_encodings, encoding)
-            best_idx = np.argmin(distances)
-            if distances[best_idx] < FACE_DISTANCE_THRESHOLD:
-                name = known_names[best_idx]
-        results.append((left, top, right, bottom, name))
+        try:
+            label, confidence = face_recognizer.predict(face_roi)
+            if confidence < 80:
+                name = known_names[label]
+        except Exception:
+            pass
+        results.append((x, y, x + w, y + h, name))
+
     return results
 
 
 def start_camera():
-    global cap, label_img, is_camera_running
-    if model is None:
-        if not load_model():
-            return
+    global cap, is_camera_running
+    if model is None and not load_model():
+        return
     if cap is None:
         cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -181,7 +200,7 @@ def stop_camera():
 
 
 def update_frame():
-    global cap, label_img, is_camera_running
+    global cap, is_camera_running
     global last_name, last_helmet_status
 
     if not is_camera_running:
@@ -207,12 +226,10 @@ def update_frame():
         for *xyxy, conf, cls in detections:
             conf_val = float(conf)
             class_name = model.model.names[int(cls)]
-
             if class_name == "helmet":
                 best_helmet_conf = max(best_helmet_conf, conf_val)
             elif class_name == "head":
                 best_head_conf = max(best_head_conf, conf_val)
-
             if conf_val > CONF_THRESHOLD:
                 color = (0, 255, 0) if class_name == "helmet" else (0, 0, 255)
                 cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])),
@@ -221,7 +238,6 @@ def update_frame():
                             (int(xyxy[0]), int(xyxy[1]) - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-    # 取最高置信度的类别作为最终判断
     if best_head_conf > CONF_THRESHOLD and best_head_conf >= best_helmet_conf:
         helmet_status = "未戴头盔"
     elif best_helmet_conf > CONF_THRESHOLD and best_helmet_conf > best_head_conf:
@@ -236,14 +252,13 @@ def update_frame():
     for (left, top, right, bottom, name) in faces:
         cv2.rectangle(frame, (left, top), (right, bottom), (255, 255, 0), 2)
         try:
-            text_bbox = draw.textbbox((0, 0), name, font=chinese_font)
-            text_w, text_h = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
+            bbox = draw.textbbox((0, 0), name, font=chinese_font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         except Exception:
-            text_w, text_h = 60, 24
-        if text_w > 0 and text_h > 0:
-            draw.rectangle([(left, top - text_h - 6), (left + text_w + 4, top)],
-                           fill=(255, 255, 255))
-        draw.text((left + 2, top - text_h - 4), name, font=chinese_font, fill=(0, 0, 0))
+            tw, th = 60, 24
+        if tw > 0 and th > 0:
+            draw.rectangle([(left, top - th - 6), (left + tw + 4, top)], fill=(255, 255, 255))
+        draw.text((left + 2, top - th - 4), name, font=chinese_font, fill=(0, 0, 0))
 
     if len(faces) > 0:
         named = [f[4] for f in faces if f[4] != "Unknown"]
@@ -253,7 +268,7 @@ def update_frame():
     current_time = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
     draw.text((10, 10), current_time, font=chinese_font, fill=(255, 255, 0))
 
-    # ====== 更新 GUI ======
+    # ====== GUI 更新 ======
     imgtk = ImageTk.PhotoImage(image=pil_image)
     label_img.imgtk = imgtk
     label_img.configure(image=imgtk)
@@ -262,11 +277,9 @@ def update_frame():
     last_name = person_name
     last_helmet_status = helmet_status
 
-    # ====== 日志 ======
     text_box.insert(tk.END, f"时间: {current_time}\n人脸: {person_name}\n头盔: {helmet_status}\n\n")
     text_box.yview(tk.END)
 
-    # ====== Excel 导出 ======
     df_new = pd.DataFrame({'时间': [current_time], '姓名': [person_name], '是否戴了头盔': [helmet_status]})
     if os.path.exists(EXCEL_FILE):
         try:
@@ -296,13 +309,12 @@ def upload_file():
     detections = results.xyxy[0]
     if detections is not None:
         for *xyxy, conf, cls in detections:
-            conf_val = float(conf)
-            class_name = model.model.names[int(cls)]
-            if conf_val > CONF_THRESHOLD:
+            if float(conf) > CONF_THRESHOLD:
+                class_name = model.model.names[int(cls)]
                 color = (0, 255, 0) if class_name == "helmet" else (0, 0, 255)
                 cv2.rectangle(img, (int(xyxy[0]), int(xyxy[1])),
                               (int(xyxy[2]), int(xyxy[3])), color, 2)
-                cv2.putText(img, f'{class_name} {conf_val:.2f}',
+                cv2.putText(img, f'{class_name} {float(conf):.2f}',
                             (int(xyxy[0]), int(xyxy[1]) - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
     cv2.imshow('检测结果', img)
