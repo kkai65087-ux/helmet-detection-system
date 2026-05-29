@@ -13,11 +13,17 @@
 
 ## 技术栈
 
-- **目标检测**: YOLOv5 + PyTorch
-- **人脸识别**: face_recognition
+- **目标检测**: YOLOv5 + PyTorch 2.12
+- **人脸检测**: OpenCV Haar Cascade（默认）/ face_recognition（可选）
 - **GUI**: Tkinter
 - **图像处理**: OpenCV, Pillow
 - **数据处理**: Pandas, OpenPyXL
+
+## 环境要求
+
+- Python 3.8+
+- PyTorch 2.6+ 需代码内置的兼容性补丁（已处理）
+- face_recognition 为可选依赖（安装较复杂，不安装也能正常运行）
 
 ## 性能指标
 
