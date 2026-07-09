@@ -49,14 +49,22 @@ python main.py
 3. 点击"打开摄像头"开始实时检测
 4. 检测结果自动保存至 `results.xlsx`
 
+## 演示
+
+启动后会自动打开摄像头，实时画面中：
+- 绿色框 = 已戴头盔，红色框 = 未戴头盔
+- 人脸识别显示姓名（需先在 `known_faces/` 放入照片）
+- 检测日志自动导出至 `results.xlsx`
+
 ## 项目结构
 
 ```
 helmet-detection-system/
-├── main.py           # 主程序：实时检测 + GUI + Excel导出
+├── main.py           # 主程序（~380行）：实时检测 + GUI + Excel导出
 ├── check_cuda.py     # 检查 CUDA/PyTorch 环境
 ├── requirements.txt  # 依赖列表
-├── known_faces/      # 放置已知人员面部照片
+├── known_faces/      # 放置已知人员面部照片（文件名=人名）
+├── weights/          # 训练好的模型文件 (best.pt)
 └── images/           # 运行截图
 ```
 
